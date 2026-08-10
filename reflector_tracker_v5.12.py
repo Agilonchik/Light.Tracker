@@ -182,6 +182,224 @@ def rect_distance(a: Rect, b: Rect) -> float:
     return float(np.hypot(dx, dy))
 
 
+def diamond_halo_score(component_mask: np.ndarray) -> float:
+    """Оценивает сходство компонента с симметричным ромбовидным ореолом."""
+    ys, xs = np.where(component_mask)
+    if xs.size < 3:
+        return 0.0
+    x1, x2 = int(xs.min()), int(xs.max())
+    y1, y2 = int(ys.min()), int(ys.max())
+    crop = component_mask[y1 : y2 + 1, x1 : x2 + 1].astype(bool)
+    height, width = crop.shape
+    if width < 2 or height < 2:
+        return 0.0
+
+    aspect = max(width, height) / max(1.0, min(width, height))
+    aspect_score = float(
+        np.exp(-((np.log(max(aspect, 1.0)) / 0.55) ** 2))
+    )
+    horizontal_symmetry = 1.0 - float(
+        np.mean(np.logical_xor(crop, np.fliplr(crop)))
+    )
+    vertical_symmetry = 1.0 - float(
+        np.mean(np.logical_xor(crop, np.flipud(crop)))
+    )
+    symmetry = float(
+        np.clip(0.5 * (horizontal_symmetry + vertical_symmetry), 0.0, 1.0)
+    )
+
+    yy, xx = np.indices(crop.shape, dtype=np.float32)
+    center_x = (width - 1) / 2.0
+    center_y = (height - 1) / 2.0
+    best_fit = 0.0
+    best_corner_empty = 0.0
+    for scale in (0.78, 0.90, 1.00, 1.12, 1.25):
+        half_width = max(1.0, (width - 1) * 0.5 * scale + 0.5)
+        half_height = max(1.0, (height - 1) * 0.5 * scale + 0.5)
+        l1_distance = (
+            np.abs(xx - center_x) / half_width
+            + np.abs(yy - center_y) / half_height
+        )
+        ideal = l1_distance <= 1.0
+        union = int(np.count_nonzero(crop | ideal))
+        if union:
+            best_fit = max(
+                best_fit, float(np.count_nonzero(crop & ideal) / union)
+            )
+        corner_zone = l1_distance >= 1.12
+        if np.any(corner_zone):
+            best_corner_empty = max(
+                best_corner_empty, 1.0 - float(np.mean(crop[corner_zone]))
+            )
+
+    compactness = float(xs.size / max(1.0, width * height))
+    extent_score = float(
+        np.exp(-(((compactness - 0.56) / 0.32) ** 2))
+    )
+    base_score = (
+        0.48 * best_fit
+        + 0.20 * symmetry
+        + 0.18 * best_corner_empty
+        + 0.14 * extent_score
+    )
+    return float(
+        np.clip(base_score * (0.18 + 0.82 * aspect_score), 0.0, 1.0)
+    )
+
+
+def _maximum_weight_unique_assignment(
+    score_matrix: np.ndarray, minimum_score: float
+) -> List[Tuple[int, int, float]]:
+    """Находит глобально лучшее уникальное назначение строк кандидатам."""
+    scores = np.asarray(score_matrix, dtype=np.float64)
+    if scores.ndim != 2 or scores.shape[0] == 0 or scores.shape[1] == 0:
+        return []
+    row_count, candidate_count = scores.shape
+
+    # Отдельный фиктивный столбец для каждой области позволяет оставить Pn
+    # неподтвержденной вместо назначения заведомо плохого кандидата.
+    dummy_score = float(minimum_score) - 1e-6
+    extended = np.full(
+        (row_count, candidate_count + row_count), dummy_score, dtype=np.float64
+    )
+    extended[:, :candidate_count] = scores
+    finite = extended[np.isfinite(extended)]
+    maximum = float(np.max(finite)) if finite.size else 1.0
+    costs = maximum - np.where(np.isfinite(extended), extended, -1e6)
+
+    # Венгерский алгоритм для прямоугольной матрицы (строк не больше столбцов).
+    column_count = costs.shape[1]
+    u = np.zeros(row_count + 1, dtype=np.float64)
+    v = np.zeros(column_count + 1, dtype=np.float64)
+    p = np.zeros(column_count + 1, dtype=np.int32)
+    way = np.zeros(column_count + 1, dtype=np.int32)
+    for row in range(1, row_count + 1):
+        p[0] = row
+        column0 = 0
+        minimum_values = np.full(column_count + 1, np.inf, dtype=np.float64)
+        used = np.zeros(column_count + 1, dtype=bool)
+        while True:
+            used[column0] = True
+            current_row = int(p[column0])
+            delta = np.inf
+            column1 = 0
+            for column in range(1, column_count + 1):
+                if used[column]:
+                    continue
+                current = (
+                    costs[current_row - 1, column - 1]
+                    - u[current_row]
+                    - v[column]
+                )
+                if current < minimum_values[column]:
+                    minimum_values[column] = current
+                    way[column] = column0
+                if minimum_values[column] < delta:
+                    delta = minimum_values[column]
+                    column1 = column
+            for column in range(column_count + 1):
+                if used[column]:
+                    u[p[column]] += delta
+                    v[column] -= delta
+                else:
+                    minimum_values[column] -= delta
+            column0 = column1
+            if p[column0] == 0:
+                break
+        while True:
+            column1 = int(way[column0])
+            p[column0] = p[column1]
+            column0 = column1
+            if column0 == 0:
+                break
+
+    assigned_columns = np.full(row_count, -1, dtype=np.int32)
+    for column in range(1, column_count + 1):
+        if p[column] > 0:
+            assigned_columns[p[column] - 1] = column - 1
+
+    result = []
+    for region_index, candidate_index in enumerate(assigned_columns):
+        if 0 <= candidate_index < candidate_count:
+            score = float(scores[region_index, candidate_index])
+            if np.isfinite(score) and score >= minimum_score:
+                result.append((region_index, int(candidate_index), score))
+    return result
+
+
+def assign_ir_candidates_to_regions(
+    reference_regions: List[Rect], candidates: List[Dict]
+) -> List[Tuple[int, Dict]]:
+    """Назначает каждому Pn ближайший допустимый ИК-ромб без перестановок."""
+    if not reference_regions or not candidates:
+        return []
+
+    centers = []
+    diagonals = []
+    for x, y, width, height in reference_regions:
+        centers.append(np.array([x + width / 2.0, y + height / 2.0]))
+        diagonals.append(max(30.0, float(np.hypot(width, height))))
+
+    score_matrix = np.full(
+        (len(reference_regions), len(candidates)), -np.inf, dtype=np.float64
+    )
+    for candidate_index, candidate in enumerate(candidates):
+        position = np.asarray(candidate["position"], dtype=np.float64)
+        hints = set(candidate.get("region_hints", set()))
+        eligible_regions = [
+            index
+            for index in range(len(reference_regions))
+            if not hints or index in hints
+        ]
+        if not eligible_regions:
+            continue
+        normalized_distances = {
+            index: float(np.linalg.norm(position - centers[index]))
+            / max(20.0, 0.5 * diagonals[index])
+            for index in eligible_regions
+        }
+        owner_region = min(
+            eligible_regions, key=lambda index: normalized_distances[index]
+        )
+        owner_distance = normalized_distances[owner_region]
+
+        for region_index in eligible_regions:
+            x, y, width, height = reference_regions[region_index]
+            distance = float(np.linalg.norm(position - centers[region_index]))
+            proximity_scale = max(20.0, 0.38 * diagonals[region_index])
+            proximity = float(np.exp(-((distance / proximity_scale) ** 2)))
+            inside = float(
+                x <= position[0] <= x + width
+                and y <= position[1] <= y + height
+            )
+            local_evidence = 1.0 if region_index in hints else 0.35
+            quality = float(np.clip(candidate.get("quality", 0.0), 0.0, 1.0))
+            score = (
+                0.34 * quality
+                + 0.46 * proximity
+                + 0.12 * local_evidence
+                + 0.08 * inside
+            )
+
+            # В пересекающихся областях кандидат принадлежит ближайшему Pn.
+            # Это не дает яркому объекту в нижней части общей зоны забрать P2,
+            # если настоящий P2 находится около центра своей рамки.
+            distance_gap = normalized_distances[region_index] - owner_distance
+            if region_index != owner_region and distance_gap > 0.08:
+                score *= max(0.55, float(np.exp(-1.8 * distance_gap)))
+            score_matrix[region_index, candidate_index] = score
+
+    assignments = _maximum_weight_unique_assignment(score_matrix, 0.40)
+    matches = []
+    for region_index, candidate_index, assignment_score in assignments:
+        candidate = candidates[candidate_index]
+        candidate["region_index"] = region_index
+        candidate["assignment_score"] = float(assignment_score)
+        matches.append((region_index, candidate))
+    matches.sort(key=lambda item: item[0])
+    return matches
+
+
 @dataclass
 class PeakDetection:
     position: Point
@@ -192,6 +410,7 @@ class PeakDetection:
     bbox: Rect
     threshold: float
     max_intensity: float
+    diamond_score: float = 0.0
 
 
 @dataclass
@@ -259,7 +478,7 @@ class CalibrationData:
         self.ir_settle_seconds = 2.0
         self.ir_flash_delta = 25
         self.ir_search_scale = 4.0
-        self.ir_sample_count = 3
+        self.ir_sample_count = 5
         self.hikvision_channel = 1
         # В строгом режиме каждый Pn анализируется независимо только рядом со
         # своей исходной областью. Это исключает перестановку отражателей и
@@ -271,12 +490,12 @@ class CalibrationData:
         self.ir_global_fallback = True
         self.ir_diamond_min_score = 0.45
         self.ir_lock_enabled = True
-        self.ir_lock_radius = 35.0
+        self.ir_lock_radius = 12.0
         # Ручные исходные области хранятся отдельно: ошибочная автоматическая
         # привязка больше не становится отправной точкой следующего ИК-поиска.
         self.ir_reference_regions: List[Rect] = []
         self.ir_verification_active = False
-        self.ir_model_version = 2
+        self.ir_model_version = 3
         self.ir_confirmed_centers: Dict[str, List[float]] = {}
         self.ir_confirmed_models: Dict[str, Dict] = {}
 
@@ -381,6 +600,10 @@ class CalibrationData:
             if name in data:
                 setattr(self, name, data[name])
 
+        self.ir_lock_radius = float(
+            np.clip(float(self.ir_lock_radius), 3.0, 30.0)
+        )
+
         self.roi_region = self._region(data.get("roi_region"))
         regions = []
         for region in data.get("peak_regions", []):
@@ -452,9 +675,13 @@ class CalibrationData:
                 for name in (
                     "area",
                     "diamond_score",
+                    "quality",
                     "response",
                     "night_peak",
                     "halo_radius",
+                    "tracking_area",
+                    "tracking_diamond_score",
+                    "tracking_radius",
                 ):
                     try:
                         value = float(raw_model.get(name, 0.0))
@@ -468,9 +695,9 @@ class CalibrationData:
                 if cleaned_model:
                     self.ir_confirmed_models[str(region_id)] = cleaned_model
 
-        # Якоря v5.7 и более ранних версий не содержали проверки
-        # ромбовидного ореола. Они намеренно не переносятся в новый детектор:
-        # иначе сохраненная ошибочная крыша снова получила бы LOCK.
+        # Старые якоря не содержали независимой локальной проверки Day/Night.
+        # Они намеренно не переносятся в новый детектор: иначе сохраненная
+        # ошибочная крыша/откос снова получили бы LOCK.
         if loaded_ir_model_version < self.ir_model_version and raw_centers:
             self.ir_confirmed_centers.clear()
             self.ir_confirmed_models.clear()
@@ -543,7 +770,7 @@ class HikvisionISAPI:
             headers={
                 "Accept": "application/xml",
                 "Content-Type": "application/xml; charset=UTF-8",
-                "User-Agent": "ReflectorTracker/5.8",
+                "User-Agent": "ReflectorTracker/5.12",
             },
         )
         try:
@@ -1058,7 +1285,22 @@ class ReflectorDetector:
         ):
             return None
 
-        if adaptive:
+        if anchor_ok:
+            # Для подтвержденного ИК-якоря сначала выделяем яркое ядро.
+            # Этот режим имеет приоритет даже при включенном адаптивном пороге.
+            # Низкий порог объединял ромб отражателя с белым откосом/крышей:
+            # центр общей компоненты уходил за допуск и правильная точка
+            # получала LOST, хотя визуально продолжала ярко светиться.
+            relative_core_level = background_level + 0.62 * detection_contrast
+            peak_core_level = detection_peak - max(
+                12.0, 0.32 * detection_contrast
+            )
+            threshold = max(
+                background_level + 0.35 * contrast,
+                relative_core_level,
+                peak_core_level,
+            )
+        elif adaptive:
             percentile = float(
                 np.percentile(
                     decision_signal,
@@ -1078,17 +1320,39 @@ class ReflectorDetector:
                 background_level + 0.5 * contrast,
                 min(percentile, shape_level),
             )
-        elif anchor_ok:
-            threshold = max(
-                brightness * 0.45,
-                background_level + 0.35 * contrast,
-                background_level + 0.45 * detection_contrast,
-            )
         else:
             threshold = brightness
         threshold = min(threshold, detection_peak - 1.0)
 
         binary = np.where(signal_float >= threshold, 255, 0).astype(np.uint8)
+
+        # При сопровождении подтвержденного отражателя анализ ограничивается
+        # окрестностью его неизменного Day→Night-якоря. Большая область поиска
+        # нужна на случай потери, но не должна присоединять к блику удаленные
+        # пересвеченные поверхности.
+        anchor_support_radius = 0.0
+        if anchor_probe_local is not None:
+            model_halo_radius = 0.0
+            if anchor_model:
+                try:
+                    model_halo_radius = max(
+                        0.0, float(anchor_model.get("halo_radius", 0.0))
+                    )
+                except (TypeError, ValueError):
+                    model_halo_radius = 0.0
+            anchor_support_radius = max(
+                18.0,
+                float(anchor_radius or 0.0) * 2.5,
+                float(anchor_radius or 0.0)
+                + max(8.0, model_halo_radius * 2.2),
+            )
+            support_y, support_x = np.indices(signal.shape, dtype=np.float32)
+            support_mask = (
+                (support_x - anchor_probe_local[0]) ** 2
+                + (support_y - anchor_probe_local[1]) ** 2
+                <= anchor_support_radius**2
+            )
+            binary[~support_mask] = 0
         merge_radius = max(
             0,
             int(round(self._setting(detection_settings, "merge_radius"))),
@@ -1113,19 +1377,48 @@ class ReflectorDetector:
             min_area,
             int(round(self._setting(detection_settings, "max_area"))),
         )
+        # Площадь маски Day→Night response не равна площади яркого ядра на
+        # обычном Night-кадре. Для строгого сравнения используем только
+        # tracking_area, измеренную тем же детектором; старое поле area служит
+        # исключительно описанием ИК-вспышки.
         expected_anchor_area = 0.0
+        expected_anchor_diamond = 0.0
+        response_anchor_diamond = 0.0
         if anchor_model:
             try:
                 expected_anchor_area = max(
-                    0.0, float(anchor_model.get("area", 0.0))
+                    0.0, float(anchor_model.get("tracking_area", 0.0))
                 )
             except (TypeError, ValueError):
                 expected_anchor_area = 0.0
+            try:
+                expected_anchor_diamond = float(
+                    np.clip(
+                        anchor_model.get("tracking_diamond_score", 0.0),
+                        0.0,
+                        1.0,
+                    )
+                )
+            except (TypeError, ValueError):
+                expected_anchor_diamond = 0.0
+            try:
+                response_anchor_diamond = float(
+                    np.clip(anchor_model.get("diamond_score", 0.0), 0.0, 1.0)
+                )
+            except (TypeError, ValueError):
+                response_anchor_diamond = 0.0
         if expected_anchor_area > 0:
             # Общий max_area относится к обычному яркому ядру. У
             # подтвержденной призмы ромбовидный ИК-ореол может быть в несколько
             # раз больше (как у P2 на предоставленном Night-кадре).
             max_area = max(max_area, int(np.ceil(expected_anchor_area * 4.0)))
+        elif anchor_probe_local is not None:
+            # Первый Night-кадр после ИК-поиска калибрует площадь сопровождения.
+            # До этого не ограничиваем его величиной response-маски.
+            max_area = max(
+                max_area,
+                int(np.ceil(np.pi * max(18.0, anchor_support_radius) ** 2)),
+            )
         candidates = []
         positive = np.maximum(signal_float - background_level, 0.0)
         power = float(
@@ -1150,6 +1443,30 @@ class ReflectorDetector:
             if area < min_area or area > max_area:
                 continue
             component_mask = labels == label
+            diamond_similarity = 1.0
+            current_diamond = 0.0
+            if anchor_local is not None:
+                current_diamond = diamond_halo_score(component_mask)
+                minimum_tracking_diamond = 0.12
+                if expected_anchor_diamond > 0:
+                    minimum_tracking_diamond = max(
+                        minimum_tracking_diamond,
+                        min(0.38, expected_anchor_diamond * 0.38),
+                    )
+                if current_diamond < minimum_tracking_diamond:
+                    continue
+                reference_diamond = (
+                    expected_anchor_diamond
+                    if expected_anchor_diamond > 0
+                    else response_anchor_diamond
+                )
+                if reference_diamond <= 0:
+                    reference_diamond = current_diamond
+                diamond_similarity = float(
+                    np.exp(
+                        -abs(current_diamond - reference_diamond) / 0.45
+                    )
+                )
             energy = float(np.sum(powered[component_mask]))
             center = centroids[label]
             proximity = 1.0
@@ -1188,6 +1505,7 @@ class ReflectorDetector:
                     * (0.10 + 0.90 * anchor_proximity)
                     * predicted_weight
                     * (0.22 + 0.78 * area_similarity)
+                    * (0.25 + 0.75 * diamond_similarity)
                 )
             else:
                 score = energy * predicted_weight
@@ -1198,12 +1516,14 @@ class ReflectorDetector:
                 int(stats[label, cv2.CC_STAT_HEIGHT]),
             )
             combined_proximity = float(np.sqrt(proximity * anchor_proximity))
-            candidates.append((score, label, bbox, combined_proximity))
+            candidates.append(
+                (score, label, bbox, combined_proximity, current_diamond)
+            )
 
         if not candidates:
             return None
         candidates.sort(key=lambda item: item[0], reverse=True)
-        _, best_label, best_bbox, best_proximity = candidates[0]
+        _, best_label, best_bbox, best_proximity, best_diamond = candidates[0]
 
         # Дополнительно присоединяем соседние компоненты. Это важно, когда
         # пересвеченная призма содержит несколько разорванных ярких участков.
@@ -1213,7 +1533,7 @@ class ReflectorDetector:
         changed = True
         while changed:
             changed = False
-            for _, label, bbox, _ in candidates:
+            for _, label, bbox, _, _ in candidates:
                 if label in selected_labels:
                     continue
                 if any(rect_distance(bbox, box) <= join_distance for box in selected_boxes):
@@ -1313,6 +1633,7 @@ class ReflectorDetector:
             bbox=bbox_global,
             threshold=threshold,
             max_intensity=detection_peak,
+            diamond_score=best_diamond,
         )
 
     def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
@@ -1373,18 +1694,46 @@ class ReflectorTracker:
                 str(index + 1), {}
             )
             try:
-                initial_area = max(0.0, float(saved_model.get("area", 0.0)))
+                initial_area = max(
+                    0.0, float(saved_model.get("tracking_area", 0.0))
+                )
             except (TypeError, ValueError):
                 initial_area = 0.0
-            self.tracks.append(
-                ReflectorPoint(
-                    id=index + 1,
-                    base_region=(x, y, w, h),
-                    position=center,
-                    detection_area=initial_area,
+            has_verified_anchor = bool(saved_anchor and len(saved_anchor) == 2)
+            initial_confidence = float(
+                np.clip(
+                    saved_model.get(
+                        "quality", saved_model.get("diamond_score", 0.0)
+                    ),
+                    0.0,
+                    1.0,
                 )
             )
-            self.position_history[index + 1] = deque(maxlen=self.history_length)
+            initial_radius = max(
+                3.0,
+                float(
+                    saved_model.get(
+                        "tracking_radius", saved_model.get("halo_radius", 5.0)
+                    )
+                ),
+            )
+            track = ReflectorPoint(
+                id=index + 1,
+                base_region=(x, y, w, h),
+                position=center,
+                radius=initial_radius,
+                confidence=initial_confidence,
+                last_seen=time.time() if has_verified_anchor else 0.0,
+                is_active=has_verified_anchor,
+                has_measurement=has_verified_anchor,
+                measured_this_frame=False,
+                detection_area=initial_area,
+            )
+            self.tracks.append(track)
+            history = deque(maxlen=self.history_length)
+            if has_verified_anchor:
+                history.append(center)
+            self.position_history[index + 1] = history
             valid_regions.append((x, y, w, h))
         self._region_signature = tuple(valid_regions)
 
@@ -1444,8 +1793,12 @@ class ReflectorTracker:
                     str(track.id)
                 )
                 ir_anchor_radius = max(
-                    float(self.calibration.ir_lock_radius),
-                    float(self.calibration.max_jump) * 2.0,
+                    3.0,
+                    min(
+                        float(self.calibration.ir_lock_radius),
+                        max(4.0, float(self.calibration.max_jump) * 1.25),
+                        15.0,
+                    ),
                 )
         needs_ir_confirmation = (
             self.calibration.ir_verification_active
@@ -1468,6 +1821,18 @@ class ReflectorTracker:
                 anchor_model=ir_anchor_model,
             )
 
+        # Абсолютный центр Day→Night является неподвижным эталоном. Даже если
+        # большой компонент прошёл внутренние фильтры, итоговая точка не имеет
+        # права покинуть малый допуск вокруг подтверждённого центра.
+        if detection is not None and ir_anchor is not None:
+            anchor_error = float(
+                np.linalg.norm(
+                    np.asarray(detection.position) - np.asarray(ir_anchor)
+                )
+            )
+            if anchor_error > float(ir_anchor_radius):
+                detection = None
+
         # В обычном режиме действует строгий лимит скачка. После потери поиск
         # разрешается во всей текущей (но неподвижной) области, при этом новый
         # блик должен быть похож по площади на ранее отслеживаемый.
@@ -1484,7 +1849,14 @@ class ReflectorTracker:
                 )
                 if track.detection_area > 0:
                     area_ratio = detection.area / track.detection_area
-                    if area_ratio < 0.40 or area_ratio > 2.50:
+                    if ir_anchor is not None:
+                        minimum_area_ratio, maximum_area_ratio = 0.20, 5.00
+                    else:
+                        minimum_area_ratio, maximum_area_ratio = 0.40, 2.50
+                    if (
+                        area_ratio < minimum_area_ratio
+                        or area_ratio > maximum_area_ratio
+                    ):
                         detection = None
             if detection is not None and jump > allowed_jump:
                 detection = None
@@ -1518,6 +1890,38 @@ class ReflectorTracker:
             track.missed_frames = 0
             track.detection_area = detection.area
             track.threshold = detection.threshold
+            if ir_anchor_model is not None:
+                # Модель обычного Night-сопровождения обучается отдельно от
+                # Day→Night response-маски. Плавное обновление учитывает
+                # автоэкспозицию, но не позволяет площади измениться скачком.
+                previous_tracking_area = float(
+                    ir_anchor_model.get("tracking_area", 0.0) or 0.0
+                )
+                previous_tracking_diamond = float(
+                    ir_anchor_model.get("tracking_diamond_score", 0.0) or 0.0
+                )
+                previous_tracking_radius = float(
+                    ir_anchor_model.get("tracking_radius", 0.0) or 0.0
+                )
+                model_alpha = 0.12
+                ir_anchor_model["tracking_area"] = (
+                    detection.area
+                    if previous_tracking_area <= 0
+                    else (1.0 - model_alpha) * previous_tracking_area
+                    + model_alpha * detection.area
+                )
+                ir_anchor_model["tracking_diamond_score"] = (
+                    detection.diamond_score
+                    if previous_tracking_diamond <= 0
+                    else (1.0 - model_alpha) * previous_tracking_diamond
+                    + model_alpha * detection.diamond_score
+                )
+                ir_anchor_model["tracking_radius"] = (
+                    detection.radius
+                    if previous_tracking_radius <= 0
+                    else (1.0 - model_alpha) * previous_tracking_radius
+                    + model_alpha * detection.radius
+                )
             shrinking_scale = max(
                 1.0,
                 track.search_scale - max(0.12, (track.search_scale - 1.0) * 0.35),
@@ -1879,7 +2283,7 @@ class ToolTip:
 class ReflectorApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Система устойчивого отслеживания отражателей v5.8")
+        self.root.title("Система устойчивого отслеживания отражателей v5.12")
         self.root.geometry("1500x940")
         self.root.minsize(1050, 680)
 
@@ -2420,16 +2824,16 @@ class ReflectorApp:
         ).pack(side=tk.LEFT)
         ir_lock_radius_spin = ttk.Spinbox(
             lock_row,
-            from_=5,
-            to=300,
-            increment=5,
+            from_=3,
+            to=30,
+            increment=1,
             textvariable=self.ir_lock_radius_var,
             width=6,
         )
         ir_lock_radius_spin.pack(side=tk.RIGHT)
         ir_lock_radius_spin.bind("<Return>", self._on_ir_lock_change)
         ir_lock_radius_spin.bind("<FocusOut>", self._on_ir_lock_change)
-        ttk.Label(lock_row, text="Радиус, px:").pack(side=tk.RIGHT, padx=(3, 2))
+        ttk.Label(lock_row, text="Допуск, px:").pack(side=tk.RIGHT, padx=(3, 2))
         hik_buttons = ttk.Frame(hikvision)
         hik_buttons.pack(fill=tk.X, pady=2)
         ttk.Button(
@@ -2467,9 +2871,10 @@ class ReflectorApp:
         self.hik_status_label.pack(fill=tk.X, pady=2)
         ToolTip(
             hikvision,
-            "Процедура один раз получает кадры в режиме Day и Night, выделяет "
-            "только появившийся ИК-отклик и переносит исходные области к "
-            "найденным отражателям. После поиска камера остается в Night.",
+            "Процедура получает не менее пяти кадров Day и пяти кадров Night. "
+            "Каждая область Pn независимо проверяется по локальному ИК-приросту, "
+            "яркому Night-ядру и темному Day-ядру. После поиска камера остается "
+            "в Night.",
         )
 
         detection = ttk.LabelFrame(controls, text="Обнаружение интегрального блика")
@@ -2765,11 +3170,18 @@ dL — изменение длины данного ребра относите�
 2. Проверьте адрес ISAPI, канал и авторизацию кнопкой «Проверить».
    Пустые логин и пароль автоматически берутся из RTSP URL.
 3. Нажмите «Найти отражатели: день → ночь». Камера последовательно включит
-   Day и Night. Программа ищет объекты, которые были темными в Day и стали
-   яркими в Night; белые объекты, светлые в обоих режимах, исключаются.
+   Day и Night и возьмет не менее пяти кадров каждого режима. Для каждого Pn
+   независимо проверяются: ИК-прирост, компактное яркое ядро в Night и темное
+   локальное ядро в Day. Белые поверхности и светлые текстуры исключаются до
+   распределения номеров P1…Pn.
 4. Зеленые метки — подтвержденные ИК-отражатели. D — сходство светового
    ореола с ромбом. Оранжевые рамки — локальные кандидаты, фиолетовые —
    кандидаты резервного поиска по всему кадру.
+   S — итоговая достоверность локальной проверки Day/Night. При нескольких
+   допустимых ромбах номер Pn назначается прежде всего по
+   близости к центру соответствующей исходной области; яркость не может
+   перетянуть P2 на удаленный объект. После назначения центр уточняется по
+   яркому ядру Night-кадра, а не по смещенной разности Day→Night.
 5. Рекомендуется включить «Локальный поиск отдельно для P1…Pn». Тогда каждая
    область получает собственный порог. Флажок «Резервный поиск ромба по кадру»
    позволяет найти отражатель за пределами ранее ошибочно перенесенной области.
@@ -2778,9 +3190,16 @@ dL — изменение длины данного ребра относите�
 После процедуры камера остается в Night для обычного сопровождения. Постоянное
 переключение механического IR-cut фильтра во время каждого кадра не выполняется.
 Флажок «Удерживать ИК-метку» не позволяет треку перескочить на более яркий
-объект за пределами заданного радиуса. Рекомендуемый радиус — 20–40 px.
+объект за пределами допуска. Рекомендуемый допуск — 8–12 px. Если текущий
+ромб не прошёл проверку координаты, площади или формы, используется HOLD без
+переноса маркера.
+В режиме Night сначала выделяется яркое ядро внутри ИК-якоря. Поэтому ореол
+отражателя не объединяется с белой крышей или освещённым откосом. Площадь
+Night-ядра калибруется отдельно от площади Day→Night-вспышки.
 Если после Day→Night конкретная точка не подтверждена, она получает состояние
 NO IR и не может быть заменена крышей, бордюром или другим ярким объектом.
+Каждый поиск автоматически сохраняет в папку ir_scan_records рядом со скриптом
+кадры Day, Night, изображение результата и JSON с координатами Pn.
 
 LOCK — пик найден на текущем кадре.
 HOLD — блик временно не распознан, но последняя точка удерживается.
@@ -2807,7 +3226,7 @@ LOST — превышено заданное число кадров удерж�
     def _show_about(self):
         messagebox.showinfo(
             "О программе",
-            "Система обнаружения отражателей v5.8\n\n"
+            "Система обнаружения отражателей v5.12\n\n"
             "• один постоянный трек на одну заданную область\n"
             "• объединение сложного блика в единую точку\n"
             "• яркостно-взвешенный субпиксельный центр\n"
@@ -2821,7 +3240,15 @@ LOST — превышено заданное число кадров удерж�
             "• ИК-поиск Hikvision по признаку «темный Day → яркий Night»\n"
             "• отдельный локальный порог и список кандидатов для каждого Pn\n"
             "• проверка ромбовидного ИК-ореола и резервный поиск по кадру\n"
+            "• глобально-оптимальное назначение кандидатов областям P1…Pn\n"
+            "• уточнение центра по яркому ядру Night после Day→Night\n"
+            "• независимая двойная проверка каждого Pn в Day и Night\n"
+            "• медиана не менее пяти кадров в каждом режиме\n"
             "• запрет ложного LOCK для точки без подтверждения Day→Night\n"
+            "• передача подтвержденного центра в трекер как первого измерения\n"
+            "• отдельная модель яркого ядра для обычного Night-сопровождения\n"
+            "• отсечение слияния отражателя с белым откосом или крышей\n"
+            "• автоматическое сохранение Day/Night и результата ИК-поиска\n"
             "• ИК-якорь против перехода на посторонние белые объекты",
         )
 
@@ -3045,7 +3472,7 @@ LOST — превышено заданное число кадров удерж�
             return
         if self.current_frame is not None:
             target.append(cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2GRAY))
-        required = max(3, int(self.calibration.ir_sample_count))
+        required = max(5, int(self.calibration.ir_sample_count))
         if len(target) >= required:
             done(token)
             return
@@ -3200,64 +3627,7 @@ LOST — превышено заданное число кадров удерж�
 
     @staticmethod
     def _diamond_halo_score(component_mask: np.ndarray) -> float:
-        """Оценивает сходство компонента с симметричным ромбовидным ореолом."""
-        ys, xs = np.where(component_mask)
-        if xs.size < 3:
-            return 0.0
-        x1, x2 = int(xs.min()), int(xs.max())
-        y1, y2 = int(ys.min()), int(ys.max())
-        crop = component_mask[y1 : y2 + 1, x1 : x2 + 1].astype(bool)
-        height, width = crop.shape
-        if width < 2 or height < 2:
-            return 0.0
-
-        aspect = max(width, height) / max(1.0, min(width, height))
-        aspect_score = float(
-            np.exp(-((np.log(max(aspect, 1.0)) / 0.55) ** 2))
-        )
-        horizontal_symmetry = 1.0 - float(
-            np.mean(np.logical_xor(crop, np.fliplr(crop)))
-        )
-        vertical_symmetry = 1.0 - float(
-            np.mean(np.logical_xor(crop, np.flipud(crop)))
-        )
-        symmetry = float(np.clip(0.5 * (horizontal_symmetry + vertical_symmetry), 0.0, 1.0))
-
-        yy, xx = np.indices(crop.shape, dtype=np.float32)
-        center_x = (width - 1) / 2.0
-        center_y = (height - 1) / 2.0
-        best_fit = 0.0
-        best_corner_empty = 0.0
-        for scale in (0.78, 0.90, 1.00, 1.12, 1.25):
-            half_width = max(1.0, (width - 1) * 0.5 * scale + 0.5)
-            half_height = max(1.0, (height - 1) * 0.5 * scale + 0.5)
-            l1_distance = (
-                np.abs(xx - center_x) / half_width
-                + np.abs(yy - center_y) / half_height
-            )
-            ideal = l1_distance <= 1.0
-            union = int(np.count_nonzero(crop | ideal))
-            if union:
-                fit = float(np.count_nonzero(crop & ideal) / union)
-                best_fit = max(best_fit, fit)
-            corner_zone = l1_distance >= 1.12
-            if np.any(corner_zone):
-                corner_occupancy = float(np.mean(crop[corner_zone]))
-                best_corner_empty = max(best_corner_empty, 1.0 - corner_occupancy)
-
-        compactness = float(xs.size / max(1.0, width * height))
-        extent_score = float(
-            np.exp(-(((compactness - 0.56) / 0.32) ** 2))
-        )
-        base_score = (
-            0.48 * best_fit
-            + 0.20 * symmetry
-            + 0.18 * best_corner_empty
-            + 0.14 * extent_score
-        )
-        # Ромб не может быть длинной полосой. Множитель сильнее простого
-        # отбрасывания по bbox и устойчив к небольшому обрезанию ореола.
-        return float(np.clip(base_score * (0.18 + 0.82 * aspect_score), 0.0, 1.0))
+        return diamond_halo_score(component_mask)
 
     def _extract_ir_candidates(
         self,
@@ -3412,6 +3782,229 @@ LOST — превышено заданное число кадров удерж�
         )
         return candidates, float(local_threshold)
 
+    def _refine_ir_candidate_on_night(
+        self,
+        night_u8: np.ndarray,
+        candidate: Dict,
+        region_index: int,
+    ) -> bool:
+        """Уточняет центр только по локальному ядру исходного response-ромба."""
+        x, y, width, height = [int(value) for value in candidate["bbox"]]
+        response_center = (
+            float(candidate["position"][0]),
+            float(candidate["position"][1]),
+        )
+        candidate["response_position"] = response_center
+        candidate["refined_night_core"] = False
+        object_size = max(3.0, float(max(width, height)))
+        support_radius = max(12.0, min(32.0, object_size * 0.90))
+        probe_radius = max(4.0, min(12.0, object_size * 0.40))
+        margin = int(np.ceil(support_radius + 3.0))
+        crop_rect = clip_rect(
+            (
+                int(round(response_center[0])) - margin,
+                int(round(response_center[1])) - margin,
+                2 * margin + 1,
+                2 * margin + 1,
+            ),
+            night_u8.shape,
+        )
+        if crop_rect is None:
+            return False
+        crop_x, crop_y, crop_width, crop_height = crop_rect
+        gray = cv2.GaussianBlur(
+            night_u8[crop_y : crop_y + crop_height, crop_x : crop_x + crop_width],
+            (3, 3),
+            0.5,
+        ).astype(np.float32)
+        local_center = np.array(
+            [response_center[0] - crop_x, response_center[1] - crop_y],
+            dtype=np.float32,
+        )
+        yy, xx = np.indices(gray.shape, dtype=np.float32)
+        distance = np.sqrt(
+            (xx - local_center[0]) ** 2 + (yy - local_center[1]) ** 2
+        )
+        probe_values = gray[distance <= probe_radius]
+        ring_values = gray[
+            (distance >= support_radius * 0.72)
+            & (distance <= support_radius)
+        ]
+        if probe_values.size < 4 or ring_values.size < 12:
+            return False
+        peak = float(np.percentile(probe_values, 98.0))
+        background = float(np.median(ring_values))
+        local_contrast = peak - background
+        if local_contrast < 8.0:
+            return False
+        threshold = max(
+            background + 0.65 * local_contrast,
+            peak - max(10.0, 0.25 * local_contrast),
+        )
+        binary = (
+            (gray >= threshold) & (distance <= support_radius)
+        ).astype(np.uint8)
+        binary = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        )
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+        maximum_correction = max(6.0, min(12.0, object_size * 0.42))
+        minimum_diamond = max(
+            0.18,
+            min(0.38, float(self.calibration.ir_diamond_min_score) * 0.45),
+        )
+        components = []
+        for label in range(1, count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            correction = float(
+                np.linalg.norm(centroids[label] - local_center)
+            )
+            if correction > maximum_correction:
+                continue
+            if area < 3 or area > max(80, int(width * height * 2.5)):
+                continue
+            component = labels == label
+            diamond = diamond_halo_score(component)
+            if diamond < minimum_diamond:
+                continue
+            distance_score = float(
+                np.exp(
+                    -(
+                        correction
+                        / max(3.0, maximum_correction * 0.55)
+                    )
+                    ** 2
+                )
+            )
+            score = distance_score * (0.30 + 0.70 * diamond)
+            components.append((score, label, correction, diamond, area))
+        if not components:
+            return False
+
+        _, best_label, correction, diamond, area = max(components)
+        component = labels == best_label
+        positive = np.maximum(gray - background, 0.0)
+        weights = np.power(positive, 1.5) * component.astype(np.float32)
+        total_weight = float(np.sum(weights))
+        component_y, component_x = np.where(component)
+        geometric = np.array(
+            [float(np.mean(component_x)), float(np.mean(component_y))]
+        )
+        if total_weight > 0:
+            weighted = np.array(
+                [
+                    float(np.sum(xx * weights) / total_weight),
+                    float(np.sum(yy * weights) / total_weight),
+                ]
+            )
+            local_position = 0.70 * geometric + 0.30 * weighted
+        else:
+            local_position = geometric
+        position = local_position + np.array([crop_x, crop_y])
+        bbox = (
+            int(stats[best_label, cv2.CC_STAT_LEFT]) + crop_x,
+            int(stats[best_label, cv2.CC_STAT_TOP]) + crop_y,
+            int(stats[best_label, cv2.CC_STAT_WIDTH]),
+            int(stats[best_label, cv2.CC_STAT_HEIGHT]),
+        )
+        candidate["position"] = (float(position[0]), float(position[1]))
+        candidate["center_correction"] = float(correction)
+        candidate["tracking_area"] = float(area)
+        candidate["tracking_diamond_score"] = float(diamond)
+        candidate["tracking_radius"] = float(np.sqrt(area / np.pi))
+        candidate["tracking_bbox"] = [int(value) for value in bbox]
+        candidate["refined_night_core"] = True
+        candidate["night_core_threshold"] = float(threshold)
+        return True
+
+    @staticmethod
+    def _validate_ir_local_signature(
+        day_normalized: np.ndarray,
+        night_normalized: np.ndarray,
+        candidate: Dict,
+    ) -> bool:
+        """Проверяет: темное локальное ядро Day становится ярким в Night."""
+        center_x, center_y = [float(value) for value in candidate["position"]]
+        bbox = candidate.get("tracking_bbox", candidate["bbox"])
+        object_size = max(3.0, float(max(bbox[2], bbox[3])))
+        core_radius = max(4.0, min(18.0, object_size * 0.45))
+        ring_inner = max(core_radius + 2.0, object_size * 0.70)
+        ring_outer = max(
+            ring_inner + 3.0, min(42.0, object_size * 1.25)
+        )
+        margin = int(np.ceil(ring_outer + 1.0))
+        height, width = day_normalized.shape
+        x1 = max(0, int(np.floor(center_x)) - margin)
+        y1 = max(0, int(np.floor(center_y)) - margin)
+        x2 = min(width, int(np.ceil(center_x)) + margin + 1)
+        y2 = min(height, int(np.ceil(center_y)) + margin + 1)
+        if x2 - x1 < 5 or y2 - y1 < 5:
+            return False
+        yy, xx = np.indices((y2 - y1, x2 - x1), dtype=np.float32)
+        distance = np.sqrt(
+            (xx - (center_x - x1)) ** 2 + (yy - (center_y - y1)) ** 2
+        )
+        core = distance <= core_radius
+        ring = (distance >= ring_inner) & (distance <= ring_outer)
+        if np.count_nonzero(core) < 12 or np.count_nonzero(ring) < 24:
+            return False
+        day_crop = day_normalized[y1:y2, x1:x2]
+        night_crop = night_normalized[y1:y2, x1:x2]
+        day_core = float(np.mean(day_crop[core]))
+        day_ring = float(np.median(day_crop[ring]))
+        night_core = float(np.mean(night_crop[core]))
+        night_ring = float(np.median(night_crop[ring]))
+        day_contrast = day_core - day_ring
+        night_contrast = night_core - night_ring
+        contrast_gain = night_contrast - day_contrast
+
+        candidate["day_core"] = day_core
+        candidate["day_ring"] = day_ring
+        candidate["night_core"] = night_core
+        candidate["night_ring"] = night_ring
+        candidate["day_local_contrast"] = day_contrast
+        candidate["night_local_contrast"] = night_contrast
+        candidate["local_contrast_gain"] = contrast_gain
+
+        valid = (
+            bool(candidate.get("refined_night_core", False))
+            and night_core >= 0.45
+            and night_contrast >= 0.08
+            and contrast_gain >= 0.16
+            and day_core <= 0.72
+            and day_contrast <= 0.14
+        )
+        if not valid:
+            return False
+
+        signature_score = float(
+            np.clip(
+                0.34 * np.clip(night_contrast / 0.55, 0.0, 1.0)
+                + 0.34 * np.clip(contrast_gain / 0.65, 0.0, 1.0)
+                + 0.16 * np.clip((0.14 - day_contrast) / 0.40, 0.0, 1.0)
+                + 0.16
+                * np.clip(
+                    candidate.get("tracking_diamond_score", 0.0), 0.0, 1.0
+                ),
+                0.0,
+                1.0,
+            )
+        )
+        candidate["signature_score"] = signature_score
+        candidate["quality"] = float(
+            np.clip(
+                0.42 * float(candidate.get("quality", 0.0))
+                + 0.58 * signature_score,
+                0.0,
+                1.0,
+            )
+        )
+        return True
+
     def _analyze_ir_flash_frames(
         self, day_samples: List[np.ndarray], night_samples: List[np.ndarray]
     ):
@@ -3464,7 +4057,7 @@ LOST — превышено заданное число кадров удерж�
         # больше не мешает найти фактический P2 справа.
         strict_regions = bool(self.calibration.ir_strict_regions)
         configured_scale = max(1.0, float(self.calibration.ir_search_scale))
-        search_scale = min(configured_scale, 2.0) if strict_regions else configured_scale
+        search_scale = min(configured_scale, 1.5) if strict_regions else configured_scale
         reference_regions = (
             list(self.calibration.ir_reference_regions)
             if len(self.calibration.ir_reference_regions)
@@ -3557,46 +4150,86 @@ LOST — превышено заданное число кадров удерж�
                 duplicate["region_hints"].update(candidate["region_hints"])
                 if duplicate["source"] != candidate["source"]:
                     duplicate["source"] = "local+global"
-        candidates = candidates[: max(30, len(reference_regions) * 12)]
+        # Каждый кандидат независимо обязан пройти второй детектор по Night и
+        # локальную проверку «темное ядро Day → яркое ядро Night». Только после
+        # этого разрешается назначать ему номер Pn. Это исключает однотипный
+        # выбор текстуры крыши/откоса вместо отражателя.
+        night_u8 = np.clip(night, 0, 255).astype(np.uint8)
+        validated_candidates = []
+        for candidate in candidates:
+            hints = set(candidate.get("region_hints", set()))
+            eligible_regions = (
+                sorted(hints)
+                if hints
+                else list(range(len(reference_regions)))
+            )
+            if not eligible_regions:
+                continue
+            candidate_position = np.asarray(candidate["position"])
+            refinement_region = min(
+                eligible_regions,
+                key=lambda index: float(
+                    np.linalg.norm(
+                        candidate_position
+                        - np.asarray(
+                            [
+                                reference_regions[index][0]
+                                + reference_regions[index][2] / 2.0,
+                                reference_regions[index][1]
+                                + reference_regions[index][3] / 2.0,
+                            ]
+                        )
+                    )
+                ),
+            )
+            if not self._refine_ir_candidate_on_night(
+                night_u8, candidate, refinement_region
+            ):
+                continue
+            if not self._validate_ir_local_signature(
+                day_normalized, night_normalized, candidate
+            ):
+                continue
+            validated_candidates.append(candidate)
 
-        # Назначение выполняется только между уже подтвержденными ромбами.
-        # Форма/Day→Night имеют больший вес, чем близость к старой ошибочной
-        # области, поэтому настоящий P2 справа побеждает светлую крышу слева.
-        frame_distance = max(40.0, 0.34 * float(np.hypot(*response.shape)))
-        pairs = []
-        for region_index, region in enumerate(reference_regions):
-            x, y, width, height = region
-            region_center = np.array([x + width / 2.0, y + height / 2.0])
-            for candidate_index, candidate in enumerate(candidates):
+        # После уточнения два response-фрагмента могут попасть в одно и то же
+        # Night-ядро. Оставляем один, объединяя сведения о локальных областях.
+        candidates = []
+        for candidate in sorted(
+            validated_candidates,
+            key=lambda item: (item["quality"], item["strength"]),
+            reverse=True,
+        ):
+            duplicate = None
+            for existing in candidates:
                 distance = float(
                     np.linalg.norm(
-                        np.asarray(candidate["position"]) - region_center
+                        np.asarray(candidate["position"])
+                        - np.asarray(existing["position"])
                     )
                 )
-                proximity = float(np.exp(-((distance / frame_distance) ** 2)))
-                local_bonus = 1.0 if region_index in candidate["region_hints"] else 0.0
-                assignment_score = (
-                    0.72 * float(candidate["quality"])
-                    + 0.20 * proximity
-                    + 0.08 * local_bonus
-                )
-                pairs.append((assignment_score, region_index, candidate_index))
-        pairs.sort(key=lambda item: item[0], reverse=True)
-        used_regions = set()
-        used_candidates = set()
-        matches = []
-        for assignment_score, region_index, candidate_index in pairs:
-            if assignment_score < 0.40:
-                continue
-            if region_index in used_regions or candidate_index in used_candidates:
-                continue
-            candidate = candidates[candidate_index]
-            candidate["region_index"] = region_index
-            candidate["assignment_score"] = float(assignment_score)
-            used_regions.add(region_index)
-            used_candidates.add(candidate_index)
-            matches.append((region_index, candidate))
-        matches.sort(key=lambda item: item[0])
+                if distance <= max(
+                    4.0,
+                    0.25
+                    * min(
+                        max(candidate["tracking_bbox"][2:]),
+                        max(existing["tracking_bbox"][2:]),
+                    ),
+                ):
+                    duplicate = existing
+                    break
+            if duplicate is None:
+                candidates.append(candidate)
+            else:
+                duplicate["region_hints"].update(candidate["region_hints"])
+                if duplicate["source"] != candidate["source"]:
+                    duplicate["source"] = "local+global"
+        candidates = candidates[: max(30, len(reference_regions) * 12)]
+
+        # Положение внутри назначенной пользователем области теперь важнее
+        # небольшой разницы яркости между несколькими допустимыми ромбами.
+        # Назначение выполняется глобально, а не жадно по одной лучшей паре.
+        matches = assign_ir_candidates_to_regions(reference_regions, candidates)
 
         threshold = (
             float(np.median(local_thresholds))
@@ -3604,7 +4237,6 @@ LOST — превышено заданное число кадров удерж�
             else float(self.calibration.ir_flash_delta)
         )
 
-        night_u8 = np.clip(night, 0, 255).astype(np.uint8)
         preview = cv2.cvtColor(night_u8, cv2.COLOR_GRAY2BGR)
         try:
             response_max = max(1.0, float(np.max(response)))
@@ -3649,7 +4281,10 @@ LOST — превышено заданное число кадров удерж�
             )
             cv2.putText(
                 preview,
-                f"D:{candidate['diamond_score']:.2f}",
+                (
+                    f"D:{candidate['diamond_score']:.2f} "
+                    f"S:{candidate.get('signature_score', 0.0):.2f}"
+                ),
                 (x, min(preview.shape[0] - 4, y + height + 13)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.34,
@@ -3662,7 +4297,10 @@ LOST — превышено заданное число кадров удерж�
             cv2.circle(preview, (px, py), 10, (0, 255, 0), 2, cv2.LINE_AA)
             cv2.putText(
                 preview,
-                f"P{region_index + 1} IR D:{candidate['diamond_score']:.2f}",
+                (
+                    f"P{region_index + 1} IR "
+                    f"S:{candidate.get('signature_score', 0.0):.2f}"
+                ),
                 (px + 12, py - 10),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.55,
@@ -3673,7 +4311,7 @@ LOST — превышено заданное число кадров удерж�
         cv2.putText(
             preview,
             (
-                f"IR diamond: {len(matches)}/{len(self.calibration.peak_regions)}; "
+                f"IR verified: {len(matches)}/{len(self.calibration.peak_regions)}; "
                 f"T={threshold:.1f}; shift=({alignment[0]:+.1f},{alignment[1]:+.1f})"
             ),
             (10, 58),
@@ -3684,6 +4322,130 @@ LOST — превышено заданное число кадров удерж�
             cv2.LINE_AA,
         )
         return matches, candidates, preview, threshold
+
+    @staticmethod
+    def _write_png_unicode(path: Path, image: np.ndarray):
+        success, encoded = cv2.imencode(".png", image)
+        if not success:
+            raise RuntimeError(f"Не удалось закодировать {path.name}")
+        encoded.tofile(str(path))
+
+    def _save_ir_scan_diagnostics(self, preview, matches, threshold) -> Optional[Path]:
+        """Автоматически сохраняет Day, Night, результат и координаты поиска."""
+        try:
+            output_dir = Path(__file__).resolve().parent / "ir_scan_records"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            base = output_dir / f"ir_scan_{stamp}"
+            if self._ir_day_samples:
+                day = np.median(np.stack(self._ir_day_samples), axis=0).astype(
+                    np.uint8
+                )
+                self._write_png_unicode(
+                    base.with_name(base.name + "_day.png"), day
+                )
+            if self._ir_night_samples:
+                night = np.median(np.stack(self._ir_night_samples), axis=0).astype(
+                    np.uint8
+                )
+                self._write_png_unicode(
+                    base.with_name(base.name + "_night.png"), night
+                )
+            result_path = base.with_name(base.name + "_result.png")
+            self._write_png_unicode(result_path, preview)
+            metadata = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "threshold": float(threshold),
+                "expected": len(self.calibration.peak_regions),
+                "found": len(matches),
+                "points": {
+                    f"P{region_index + 1}": {
+                        "position": [
+                            float(candidate["position"][0]),
+                            float(candidate["position"][1]),
+                        ],
+                        "bbox": [int(value) for value in candidate["bbox"]],
+                        "area": float(candidate["area"]),
+                        "diamond_score": float(candidate["diamond_score"]),
+                        "quality": float(candidate["quality"]),
+                        "response_position": [
+                            float(value)
+                            for value in candidate.get(
+                                "response_position", candidate["position"]
+                            )
+                        ],
+                        "center_correction": float(
+                            candidate.get("center_correction", 0.0)
+                        ),
+                        "tracking_area": float(
+                            candidate.get("tracking_area", 0.0)
+                        ),
+                        "signature_score": float(
+                            candidate.get("signature_score", 0.0)
+                        ),
+                        "day_core": float(candidate.get("day_core", 0.0)),
+                        "night_core": float(candidate.get("night_core", 0.0)),
+                        "day_local_contrast": float(
+                            candidate.get("day_local_contrast", 0.0)
+                        ),
+                        "night_local_contrast": float(
+                            candidate.get("night_local_contrast", 0.0)
+                        ),
+                        "local_contrast_gain": float(
+                            candidate.get("local_contrast_gain", 0.0)
+                        ),
+                    }
+                    for region_index, candidate in matches
+                },
+                "settings": {
+                    "ir_flash_delta": self.calibration.ir_flash_delta,
+                    "ir_diamond_min_score": self.calibration.ir_diamond_min_score,
+                    "ir_lock_radius": self.calibration.ir_lock_radius,
+                    "ir_search_scale": self.calibration.ir_search_scale,
+                },
+            }
+            with open(
+                base.with_name(base.name + "_data.json"),
+                "w",
+                encoding="utf-8",
+            ) as file:
+                json.dump(metadata, file, ensure_ascii=False, indent=2)
+            return result_path
+        except Exception as exc:
+            logger.warning("Не удалось сохранить диагностику ИК-поиска: %s", exc)
+            return None
+
+    def _initialize_ir_tracking_models(self):
+        """Калибрует Night-маску тем же детектором, который ведет треки."""
+        if not self._ir_night_samples:
+            return
+        night_gray = np.median(
+            np.stack(self._ir_night_samples), axis=0
+        ).astype(np.uint8)
+        night_frame = cv2.cvtColor(night_gray, cv2.COLOR_GRAY2BGR)
+        detector = ReflectorDetector(self.calibration)
+        anchor_radius = max(3.0, float(self.calibration.ir_lock_radius))
+        for index, region in enumerate(self.calibration.peak_regions):
+            point_id = str(index + 1)
+            saved_anchor = self.calibration.ir_confirmed_centers.get(point_id)
+            model = self.calibration.ir_confirmed_models.get(point_id)
+            if not saved_anchor or len(saved_anchor) != 2 or model is None:
+                continue
+            anchor = (float(saved_anchor[0]), float(saved_anchor[1]))
+            detection = detector.detect_in_region(
+                night_frame,
+                region,
+                predicted=anchor,
+                detection_settings=self.calibration.region_settings.get(point_id),
+                anchor=anchor,
+                anchor_radius=anchor_radius,
+                anchor_model=model,
+            )
+            if detection is None:
+                continue
+            model["tracking_area"] = float(detection.area)
+            model["tracking_diamond_score"] = float(detection.diamond_score)
+            model["tracking_radius"] = float(detection.radius)
 
     def _finish_ir_flash_scan(self, token: int, result):
         if token != self._ir_scan_token:
@@ -3702,14 +4464,22 @@ LOST — превышено заданное число кадров удерж�
                 "area": float(candidate["area"]),
                 "bbox": [int(value) for value in candidate["bbox"]],
                 "diamond_score": float(candidate["diamond_score"]),
+                "quality": float(candidate["quality"]),
                 "response": float(candidate["response"]),
                 "night_peak": float(candidate.get("night_peak", 0.0)),
                 "halo_radius": float(candidate["halo_radius"]),
+                "tracking_area": float(candidate.get("tracking_area", 0.0)),
+                "tracking_diamond_score": float(
+                    candidate.get("tracking_diamond_score", 0.0)
+                ),
+                "tracking_radius": float(
+                    candidate.get("tracking_radius", 0.0)
+                ),
             }
             for region_index, candidate in matches
         }
         self.calibration.ir_verification_active = True
-        self.calibration.ir_model_version = 2
+        self.calibration.ir_model_version = 3
         if matches:
             regions = list(self.calibration.peak_regions)
             frame_shape = preview.shape
@@ -3743,12 +4513,19 @@ LOST — превышено заданное число кадров удерж�
                 max(x2s) - min(xs),
                 max(y2s) - min(ys),
             )
+            # В момент успешного ИК-поиска Night-кадры уже доступны. Сразу
+            # создаем сопоставимую модель обычного сопровождения, чтобы первый
+            # следующий кадр не сравнивался с response-маской другого типа.
+            self._initialize_ir_tracking_models()
         if self.tracker:
             self._reset_processing_modules(announce=False)
         self._update_region_status()
 
         self._ir_preview_overlay = preview
         self._ir_preview_until = time.time() + 6.0
+        diagnostic_path = self._save_ir_scan_diagnostics(
+            preview, matches, threshold
+        )
         self._ir_scan_running = False
         self._ir_day_samples = []
         self._ir_night_samples = []
@@ -3761,7 +4538,12 @@ LOST — превышено заданное число кадров удерж�
         self.hik_status_label.config(
             text=(
                 f"ИК-поиск: найдено {found}/{expected}; порог {threshold:.1f}. "
-                "Камера оставлена в Night. Зеленые метки видны 6 с."
+                "Камера оставлена в Night. "
+                + (
+                    f"Снимок: {diagnostic_path.name}."
+                    if diagnostic_path is not None
+                    else "Не удалось сохранить снимок."
+                )
             ),
             foreground=color,
         )
@@ -3820,7 +4602,7 @@ LOST — превышено заданное число кадров удерж�
         self.calibration.ir_settle_seconds = float(np.clip(settle, 0.5, 10.0))
         self.calibration.ir_flash_delta = int(np.clip(flash_delta, 5, 200))
         self.calibration.ir_search_scale = float(np.clip(search_scale, 1.0, 12.0))
-        self.calibration.ir_sample_count = int(np.clip(sample_count, 3, 9))
+        self.calibration.ir_sample_count = int(np.clip(sample_count, 5, 9))
         self.calibration.ir_strict_regions = bool(
             self.ir_strict_regions_var.get()
         )
@@ -3831,7 +4613,7 @@ LOST — превышено заданное число кадров удерж�
             np.clip(diamond_min_score, 0.10, 0.90)
         )
         self.calibration.ir_lock_enabled = bool(self.ir_lock_enabled_var.get())
-        self.calibration.ir_lock_radius = float(np.clip(lock_radius, 5.0, 300.0))
+        self.calibration.ir_lock_radius = float(np.clip(lock_radius, 3.0, 30.0))
         self.ir_settle_var.set(self.calibration.ir_settle_seconds)
         self.ir_flash_delta_var.set(self.calibration.ir_flash_delta)
         self.ir_search_scale_var.set(self.calibration.ir_search_scale)
@@ -3859,7 +4641,7 @@ LOST — превышено заданное число кадров удерж�
         self.calibration.ir_diamond_min_score = float(
             np.clip(diamond_min_score, 0.10, 0.90)
         )
-        self.calibration.ir_lock_radius = float(np.clip(radius, 5.0, 300.0))
+        self.calibration.ir_lock_radius = float(np.clip(radius, 3.0, 30.0))
         self.ir_diamond_min_score_var.set(
             self.calibration.ir_diamond_min_score
         )
