@@ -1,0 +1,14 @@
+# Зависимости reflector_tracker_v5.py
+# Установка: python -m pip install -r Requirements.txt
+# Рекомендуемая версия Python: 3.10 или новее.
+
+numpy>=1.26,<3
+opencv-python>=4.8,<5
+Pillow>=10.0,<13
+
+# Tkinter входит в официальный установщик Python для Windows и через pip
+# не устанавливается. При установке Python оставьте компонент Tcl/Tk включенным.
+#
+# Для RTSP-потока и записи окна также требуется системный FFmpeg, доступный
+# через PATH. В Windows его можно установить командой:
+# winget install --id Gyan.FFmpeg -e
