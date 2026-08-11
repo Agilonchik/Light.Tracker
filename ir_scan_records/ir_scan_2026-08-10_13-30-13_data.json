@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-08-10T13:30:13",
+  "threshold": 25.0,
+  "expected": 2,
+  "found": 0,
+  "points": {},
+  "settings": {
+    "ir_flash_delta": 25,
+    "ir_diamond_min_score": 0.45,
+    "ir_lock_radius": 12.0,
+    "ir_search_scale": 4.0
+  }
+}

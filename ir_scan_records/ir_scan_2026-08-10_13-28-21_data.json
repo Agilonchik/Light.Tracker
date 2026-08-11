@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-08-10T13:28:21",
+  "threshold": 69.5885595703125,
+  "expected": 2,
+  "found": 1,
+  "points": {
+    "P1": {
+      "position": [
+        1252.4922011375427,
+        913.010504245758
+      ],
+      "bbox": [
+        1248,
+        909,
+        10,
+        9
+      ],
+      "area": 66.0,
+      "diamond_score": 0.9359067640599795,
+      "quality": 0.9299483534725081,
+      "response_position": [
+        1252.485245183986,
+        913.0603539366241
+      ],
+      "center_correction": 0.06213172127973054,
+      "tracking_area": 32.0,
+      "signature_score": 0.9223017765142063,
+      "day_core": 0.06013211152173367,
+      "night_core": 0.8254349816849818,
+      "day_local_contrast": -0.08459741182090152,
+      "night_local_contrast": 0.6578525641025641,
+      "local_contrast_gain": 0.7424499759234656
+    }
+  },
+  "settings": {
+    "ir_flash_delta": 25,
+    "ir_diamond_min_score": 0.45,
+    "ir_lock_radius": 12.0,
+    "ir_search_scale": 4.0
+  }
+}
