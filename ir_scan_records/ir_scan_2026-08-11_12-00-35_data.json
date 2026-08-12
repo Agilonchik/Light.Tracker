@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-08-11T12:00:35",
+  "threshold": 107.88287109375,
+  "expected": 2,
+  "found": 1,
+  "points": {
+    "P1": {
+      "position": [
+        1251.1987142857142,
+        912.0867142857143
+      ],
+      "bbox": [
+        1247,
+        909,
+        9,
+        9
+      ],
+      "area": 55.0,
+      "diamond_score": 0.866189271451593,
+      "quality": 0.9642181029041019,
+      "response_position": [
+        1251.2939792207792,
+        911.8630597402597
+      ],
+      "center_correction": 0.4981038682157981,
+      "tracking_area": 28.0,
+      "signature_score": 0.9903177563164844,
+      "day_core": 0.13241406098271508,
+      "night_core": 0.9468085106382979,
+      "day_local_contrast": -0.04741775924286393,
+      "night_local_contrast": 0.6724915257798383,
+      "local_contrast_gain": 0.7199092850227022,
+      "core_gain": 0.7965801170289979,
+      "core_gain_high": 0.9203219071664401,
+      "core_pixel_count": 28,
+      "raw_day_level": 0.2010321021080017,
+      "raw_night_level": 0.9450980424880981,
+      "raw_gain_min": 0.7489851415157318,
+      "raw_cycle_gains": [
+        0.7489851415157318,
+        0.7790613770484924
+      ],
+      "day_black_positions": [
+        [
+          1252.1987142857142,
+          914.0867142857143
+        ],
+        [
+          1252.1987142857142,
+          914.0867142857143
+        ]
+      ],
+      "day_black_fraction_min": 0.8214285714285714,
+      "day_black_position_spread": 0.0,
+      "day_black_match_radius": 14,
+      "assignment_origin": [
+        1245.0,
+        909.5
+      ],
+      "assignment_distance_px": 6.716781192791378,
+      "assignment_line_weight": 0.980916608767009,
+      "assignment_score": 0.9829680410125132
+    }
+  },
+  "candidates": [
+    {
+      "position": [
+        1251.1987142857142,
+        912.0867142857143
+      ],
+      "bbox": [
+        1247,
+        909,
+        9,
+        9
+      ],
+      "diamond_score": 0.866189271451593,
+      "signature_score": 0.9903177563164844,
+      "quality": 0.9642181029041019,
+      "source": "local",
+      "assignment_routes": {
+        "1": {
+          "distance_px": 6.716781192791378,
+          "length_score": 0.9965160871521455,
+          "signature_score": 0.9903177563164844,
+          "tracking_diamond_score": 0.8573075848588898,
+          "line_weight": 0.980916608767009,
+          "assignment_score": 0.9829680410125132,
+          "blocked_by": [],
+          "allowed": true
+        },
+        "2": {
+          "distance_px": 69.29575440215129,
+          "blocked_by": [],
+          "allowed": false,
+          "reason": "FOREIGN_REGION"
+        }
+      }
+    }
+  ],
+  "rejected_candidates": [],
+  "settings": {
+    "ir_flash_delta": 25,
+    "ir_day_black_threshold": 85,
+    "ir_diamond_min_score": 0.45,
+    "ir_lock_radius": 12.0,
+    "ir_max_travel": 100.0,
+    "ir_search_scale": 1.0
+  }
+}
