@@ -1,0 +1,6 @@
+numpy>=1.26,<3
+opencv-python>=4.8,<5
+Pillow>=10,<13
+
+# Tkinter ставится вместе с Python (в Linux обычно пакет python3-tk).
+# Для RTSP также требуются системные ffmpeg и ffprobe в PATH.

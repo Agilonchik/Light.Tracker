@@ -1,0 +1,39 @@
+{
+  "rtsp_url": "rtsp://admin:ParallelogramM1!@10.242.52.118:554/Streaming/Channels/101",
+  "isapi_url": "http://10.242.52.118",
+  "username": "",
+  "channel": 1,
+  "expected_reflectors": 2,
+  "samples_per_state": 5,
+  "settle_seconds": 3.0,
+  "regions": [
+    [
+      1232,
+      890,
+      37,
+      41
+    ],
+    [
+      1322,
+      868,
+      34,
+      41
+    ]
+  ],
+  "detector": {
+    "day_black_max": 40,
+    "night_bright_min": 200,
+    "min_positive_gain": 160,
+    "min_area": 3,
+    "max_area": 400,
+    "blur_sigma": 0.55,
+    "close_radius": 1,
+    "day_match_radius": 5,
+    "repeat_max_distance": 12.0,
+    "center_power": 2.2,
+    "minimum_score": 0.42,
+    "minimum_diamond_score": 0.0,
+    "registration_enabled": true,
+    "registration_max_shift": 35.0
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "created_at": "2026-08-13T12:50:55",
+  "settings": {
+    "day_black_max": 40,
+    "night_bright_min": 200,
+    "min_positive_gain": 160,
+    "min_area": 3,
+    "max_area": 400,
+    "blur_sigma": 0.55,
+    "close_radius": 1,
+    "day_match_radius": 5,
+    "repeat_max_distance": 12.0,
+    "center_power": 2.2,
+    "minimum_score": 0.42,
+    "minimum_diamond_score": 0.0,
+    "registration_enabled": true,
+    "registration_max_shift": 35.0
+  },
+  "registrations": {
+    "night_cycle_1": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "day_cycle_1": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "day_cycle_2": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "night_cycle_2": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "results": [
+    {
+      "region_id": 1,
+      "roi": [
+        1232,
+        890,
+        37,
+        41
+      ],
+      "found": true,
+      "center": [
+        1248.794328098876,
+        912.1886000875973
+      ],
+      "bbox": [
+        1244,
+        907,
+        10,
+        10
+      ],
+      "score": 0.8565567534122227,
+      "reason": "OK",
+      "metrics": {
+        "repeat_distance_px": 0.11914885481606988,
+        "day_level_max": 14.203390121459961,
+        "night_level_min": 233.8958282470703,
+        "positive_gain_min": 220.2203369140625,
+        "area_cycle_1": 48.0,
+        "area_cycle_2": 59.0,
+        "diamond_score_min": 0.9519417475728156
+      }
+    },
+    {
+      "region_id": 2,
+      "roi": [
+        1322,
+        868,
+        34,
+        41
+      ],
+      "found": true,
+      "center": [
+        1338.1207986425377,
+        893.2031761658966
+      ],
+      "bbox": [
+        1328,
+        888,
+        25,
+        12
+      ],
+      "score": 0.7872667030481908,
+      "reason": "OK",
+      "metrics": {
+        "repeat_distance_px": 1.2647625365650845,
+        "day_level_max": 28.149253845214844,
+        "night_level_min": 233.51304626464844,
+        "positive_gain_min": 205.53912353515625,
+        "area_cycle_1": 115.0,
+        "area_cycle_2": 134.0,
+        "diamond_score_min": 0.7114440433212996
+      }
+    }
+  ]
+}
